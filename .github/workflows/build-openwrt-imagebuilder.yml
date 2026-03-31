@@ -160,14 +160,35 @@ jobs:
             if gzip -t "${feed_dir}/${asset_name}" >/dev/null 2>&1; then
               mv "${feed_dir}/${asset_name}" "${feed_dir}/${asset_name}.gz"
               gunzip "${feed_dir}/${asset_name}.gz"
+
+              file "${feed_dir}/${asset_name}"
+              if ! ar t "${feed_dir}/${asset_name}" >/dev/null 2>&1; then
+                if tar -tf "${feed_dir}/${asset_name}" >/dev/null 2>&1; then
+                  extract_dir="${feed_dir}/extracted"
+                  mkdir -p "${extract_dir}"
+                  tar -xf "${feed_dir}/${asset_name}" -C "${extract_dir}"
+                  find "${extract_dir}" -type f -name '*.ipk' -exec mv -f {} "${feed_dir}/" \;
+                  rm -f "${feed_dir}/${asset_name}"
+                else
+                  echo "Downloaded gzip asset is not a valid .ipk or tar archive"
+                  exit 1
+                fi
+              fi
             else
               echo "Downloaded asset is not a valid .ipk archive"
               exit 1
             fi
           fi
 
-          file "${feed_dir}/${asset_name}"
-          ar t "${feed_dir}/${asset_name}" >/dev/null
+          if ! find "${feed_dir}" -maxdepth 1 -type f -name '*.ipk' | grep -q .; then
+            echo "No .ipk files found after extracting OpenClash asset"
+            exit 1
+          fi
+
+          find "${feed_dir}" -maxdepth 1 -type f -name '*.ipk' -print0 | while IFS= read -r -d '' pkg; do
+            file "${pkg}"
+            ar t "${pkg}" >/dev/null
+          done
 
       - name: Build image
         if: steps.filter.outputs.should_build == 'true'
