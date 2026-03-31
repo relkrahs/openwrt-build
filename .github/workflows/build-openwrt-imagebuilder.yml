@@ -168,7 +168,10 @@ jobs:
           ln -sf "$(command -v sha256sum)" "${compat_bin}/sha256"
           export PATH="${compat_bin}:${PATH}"
 
-          "${imagebuilder_dir}/scripts/ipkg-make-index.sh" "${feed_dir}" > "${feed_dir}/Packages"
+          (
+            cd "${feed_dir}"
+            "${imagebuilder_dir}/scripts/ipkg-make-index.sh" . > Packages
+          )
           gzip -9nc "${feed_dir}/Packages" > "${feed_dir}/Packages.gz"
 
           printf '\nsrc/gz %s file://%s\n' "${OPENCLASH_FEED_NAME}" "${feed_dir}" >> "${imagebuilder_dir}/repositories.conf"
