@@ -1,4 +1,4 @@
-name: Build OpenWrt Images
+name: Build OpenWrt Firmware
 
 on:
   workflow_dispatch:
@@ -12,32 +12,21 @@ on:
           - all
           - xiaomi-redmi-router-ax6s
           - xiaomi-mi-router-cr6608
-      openwrt_release:
-        description: OpenWrt release version
+      openwrt_ref:
+        description: OpenWrt git branch or tag
         required: false
-        default: 25.12.2
-      openclash_release:
-        description: OpenClash release tag or latest
-        required: false
-        default: latest
+        default: openwrt-25.12
 
 permissions:
   contents: read
 
 env:
-  DEFAULT_OPENWRT_RELEASE: 25.12.2
-  DEFAULT_OPENCLASH_RELEASE: latest
-  OPENCLASH_FEED_NAME: openclash_custom
-  PACKAGES_COMMON: >-
-    luci luci-compat
-    bash dnsmasq-full ca-bundle curl ip-full ruby ruby-yaml unzip
-    kmod-tun kmod-inet-diag kmod-nft-tproxy
-    -dnsmasq
-    luci-app-openclash
+  DEFAULT_OPENWRT_REF: openwrt-25.12
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
   build:
-    name: ${{ matrix.device.name }} image
+    name: ${{ matrix.device.name }} firmware
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -46,12 +35,12 @@ jobs:
           - name: xiaomi-redmi-router-ax6s
             target: mediatek
             subtarget: mt7622
-            profile: xiaomi_redmi-router-ax6s
+            config_device: CONFIG_TARGET_mediatek_mt7622_DEVICE_xiaomi_redmi-router-ax6s
             package_arch: aarch64_cortex-a53
           - name: xiaomi-mi-router-cr6608
             target: ramips
             subtarget: mt7621
-            profile: xiaomi_mi-router-cr6608
+            config_device: CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608
             package_arch: mipsel_24kc
 
     steps:
@@ -80,7 +69,15 @@ jobs:
         if: steps.filter.outputs.should_build == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd libgmp3-dev
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
+            libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz msmtp \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
       - name: Resolve build variables
         if: steps.filter.outputs.should_build == 'true'
@@ -89,105 +86,110 @@ jobs:
         run: |
           set -euo pipefail
 
-          openwrt_release="${{ github.event.inputs.openwrt_release || '' }}"
-          openclash_release="${{ github.event.inputs.openclash_release || '' }}"
-
-          if [ -z "${openwrt_release}" ]; then
-            openwrt_release="${DEFAULT_OPENWRT_RELEASE}"
+          openwrt_ref="${{ github.event.inputs.openwrt_ref || '' }}"
+          if [ -z "${openwrt_ref}" ]; then
+            openwrt_ref="${DEFAULT_OPENWRT_REF}"
           fi
 
-          if [ -z "${openclash_release}" ]; then
-            openclash_release="${DEFAULT_OPENCLASH_RELEASE}"
-          fi
+          echo "openwrt_ref=${openwrt_ref}" >> "${GITHUB_OUTPUT}"
 
-          imagebuilder_name="openwrt-imagebuilder-${openwrt_release}-${{ matrix.device.target }}-${{ matrix.device.subtarget }}.Linux-x86_64"
-          imagebuilder_archive="${imagebuilder_name}.tar.zst"
-          download_url="https://downloads.openwrt.org/releases/${openwrt_release}/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/${imagebuilder_archive}"
-
-          echo "openwrt_release=${openwrt_release}" >> "${GITHUB_OUTPUT}"
-          echo "openclash_release=${openclash_release}" >> "${GITHUB_OUTPUT}"
-          echo "imagebuilder_name=${imagebuilder_name}" >> "${GITHUB_OUTPUT}"
-          echo "imagebuilder_archive=${imagebuilder_archive}" >> "${GITHUB_OUTPUT}"
-          echo "download_url=${download_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: Download ImageBuilder
+      - name: Clone OpenWrt source
         if: steps.filter.outputs.should_build == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 5 --retry-delay 5 \
-            "${{ steps.vars.outputs.download_url }}" \
-            -o "${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_archive }}"
-          tar --zstd -xf "${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_archive }}" -C "${{ runner.temp }}"
 
-      - name: Prepare local OpenClash feed
+          git clone --depth 1 --branch "${{ steps.vars.outputs.openwrt_ref }}" \
+            https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Cache downloads
+        if: steps.filter.outputs.should_build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/dl
+            .ccache
+          key: ${{ runner.os }}-${{ steps.vars.outputs.openwrt_ref }}-${{ matrix.device.name }}
+          restore-keys: |
+            ${{ runner.os }}-${{ steps.vars.outputs.openwrt_ref }}-
+
+      - name: Configure feeds and files
+        if: steps.filter.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd openwrt
+
+          printf '\nsrc-git openclash https://github.com/vernesong/OpenClash.git\n' >> feeds.conf.default
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          mkdir -p files
+          rsync -a "${GITHUB_WORKSPACE}/files/" files/
+
+      - name: Generate .config
+        if: steps.filter.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd openwrt
+
+          cat > .config <<EOF
+          CONFIG_TARGET_${{ matrix.device.target }}=y
+          CONFIG_TARGET_${{ matrix.device.target }}_${{ matrix.device.subtarget }}=y
+          ${{ matrix.device.config_device }}=y
+          CONFIG_TARGET_MULTI_PROFILE=n
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+          CONFIG_DEVEL=n
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-compat=y
+          # CONFIG_PACKAGE_dnsmasq is not set
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_bash=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ruby=y
+          CONFIG_PACKAGE_ruby-yaml=y
+          CONFIG_PACKAGE_unzip=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          CONFIG_PACKAGE_uci=y
+          EOF
+
+          make defconfig
+
+      - name: Download sources
+        if: steps.filter.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd openwrt
+          make download -j"$(nproc)"
+
+      - name: Build firmware
         if: steps.filter.outputs.should_build == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          CCACHE_DIR: ${{ env.CCACHE_DIR }}
         run: |
           set -euo pipefail
-
-          feed_dir="${{ runner.temp }}/openclash-feed"
-          mkdir -p "${feed_dir}"
-
-          release_ref="${{ steps.vars.outputs.openclash_release }}"
-          if [ "${release_ref}" = "latest" ]; then
-            gh release download \
-              --repo vernesong/OpenClash \
-              --pattern 'luci-app-openclash*.ipk' \
-              --dir "${feed_dir}"
-          else
-            gh release download "${release_ref}" \
-              --repo vernesong/OpenClash \
-              --pattern 'luci-app-openclash*.ipk' \
-              --dir "${feed_dir}"
-          fi
-
-          if ! find "${feed_dir}" -maxdepth 1 -type f -name 'luci-app-openclash*.ipk' | grep -q .; then
-            echo "No luci-app-openclash ipk asset found in release"
-            exit 1
-          fi
-
-          find "${feed_dir}" -maxdepth 1 -type f -name 'luci-app-openclash*.ipk' -print0 | while IFS= read -r -d '' pkg; do
-            file "${pkg}"
-            ar t "${pkg}" >/dev/null
-          done
-
-      - name: Build image
-        if: steps.filter.outputs.should_build == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          imagebuilder_dir="${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}"
-          feed_dir="${{ runner.temp }}/openclash-feed"
-          compat_bin="${{ runner.temp }}/compat-bin"
-
-          mkdir -p "${compat_bin}"
-          ln -sf "$(command -v sha256sum)" "${compat_bin}/sha256"
-          export PATH="${compat_bin}:${PATH}"
-
-          (
-            cd "${feed_dir}"
-            "${imagebuilder_dir}/scripts/ipkg-make-index.sh" . > Packages
-          )
-
-          gzip -9nc "${feed_dir}/Packages" > "${feed_dir}/Packages.gz"
-
-          printf '\nsrc/gz %s file://%s\n' "${OPENCLASH_FEED_NAME}" "${feed_dir}" >> "${imagebuilder_dir}/repositories.conf"
-
-          make -C "${imagebuilder_dir}" image \
-            PROFILE="${{ matrix.device.profile }}" \
-            PACKAGES="${PACKAGES_COMMON}" \
-            FILES="${GITHUB_WORKSPACE}/files"
+          cd openwrt
+          make -j"$(nproc)" || make -j1 V=s
 
       - name: Upload firmware
         if: steps.filter.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ steps.vars.outputs.openwrt_release }}-${{ matrix.device.name }}-${{ matrix.device.package_arch }}
+          name: openwrt-${{ steps.vars.outputs.openwrt_ref }}-${{ matrix.device.name }}-${{ matrix.device.package_arch }}
           path: |
-            ${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}/bin/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/*
+            openwrt/bin/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/*
           if-no-files-found: error
           retention-days: 7
