@@ -1,9 +1,6 @@
 name: Build OpenWrt Images
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       device:
@@ -162,16 +159,46 @@ jobs:
 
           imagebuilder_dir="${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}"
           feed_dir="${{ runner.temp }}/openclash-feed"
-          compat_bin="${{ runner.temp }}/compat-bin"
+          : > "${feed_dir}/Packages"
 
-          mkdir -p "${compat_bin}"
-          ln -sf "$(command -v sha256sum)" "${compat_bin}/sha256"
-          export PATH="${compat_bin}:${PATH}"
+          for pkg in "${feed_dir}"/*.ipk; do
+            [ -f "${pkg}" ] || continue
 
-          (
-            cd "${feed_dir}"
-            "${imagebuilder_dir}/scripts/ipkg-make-index.sh" . > Packages
-          )
+            control_archive="$(ar t "${pkg}" | grep '^control\.tar\.' | head -n 1)"
+            if [ -z "${control_archive}" ]; then
+              echo "Missing control archive in ${pkg}"
+              exit 1
+            fi
+
+            case "${control_archive}" in
+              *.tar.gz) tar_flag="z" ;;
+              *.tar.xz) tar_flag="J" ;;
+              *.tar.zst) tar_flag="--zstd" ;;
+              *.tar.bz2) tar_flag="j" ;;
+              *.tar) tar_flag="" ;;
+              *)
+                echo "Unsupported control archive format: ${control_archive}"
+                exit 1
+                ;;
+            esac
+
+            {
+              echo "Filename: $(basename "${pkg}")"
+              echo "Size: $(stat -c '%s' "${pkg}")"
+              echo "SHA256sum: $(sha256sum "${pkg}" | awk '{print $1}')"
+
+              if [ "${tar_flag}" = "--zstd" ]; then
+                ar p "${pkg}" "${control_archive}" | tar --zstd -xOf - ./control
+              elif [ -n "${tar_flag}" ]; then
+                ar p "${pkg}" "${control_archive}" | tar -xO${tar_flag}f - ./control
+              else
+                ar p "${pkg}" "${control_archive}" | tar -xOf - ./control
+              fi
+
+              echo
+            } >> "${feed_dir}/Packages"
+          done
+
           gzip -9nc "${feed_dir}/Packages" > "${feed_dir}/Packages.gz"
 
           printf '\nsrc/gz %s file://%s\n' "${OPENCLASH_FEED_NAME}" "${feed_dir}" >> "${imagebuilder_dir}/repositories.conf"
