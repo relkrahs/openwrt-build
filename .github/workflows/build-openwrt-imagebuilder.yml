@@ -142,14 +142,21 @@ jobs:
             "${api_url}" \
             -o "${feed_dir}/release.json"
 
-          asset_url="$(jq -r '.assets[] | select(.name | endswith(".ipk")) | .browser_download_url' "${feed_dir}/release.json" | head -n 1)"
-          if [ -z "${asset_url}" ] || [ "${asset_url}" = "null" ]; then
+          asset_id="$(jq -r '.assets[] | select(.name | endswith(".ipk")) | .id' "${feed_dir}/release.json" | head -n 1)"
+          asset_name="$(jq -r '.assets[] | select(.name | endswith(".ipk")) | .name' "${feed_dir}/release.json" | head -n 1)"
+          if [ -z "${asset_id}" ] || [ "${asset_id}" = "null" ] || [ -z "${asset_name}" ] || [ "${asset_name}" = "null" ]; then
             echo "No .ipk asset found in OpenClash release metadata"
             exit 1
           fi
 
-          asset_name="$(basename "${asset_url}")"
-          curl -fL --retry 5 --retry-delay 5 "${asset_url}" -o "${feed_dir}/${asset_name}"
+          curl -fL --retry 5 --retry-delay 5 \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/vernesong/OpenClash/releases/assets/${asset_id}" \
+            -o "${feed_dir}/${asset_name}"
+
+          file "${feed_dir}/${asset_name}"
+          ar t "${feed_dir}/${asset_name}" >/dev/null
 
       - name: Build image
         if: steps.filter.outputs.should_build == 'true'
@@ -159,45 +166,16 @@ jobs:
 
           imagebuilder_dir="${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}"
           feed_dir="${{ runner.temp }}/openclash-feed"
-          : > "${feed_dir}/Packages"
+          compat_bin="${{ runner.temp }}/compat-bin"
 
-          for pkg in "${feed_dir}"/*.ipk; do
-            [ -f "${pkg}" ] || continue
+          mkdir -p "${compat_bin}"
+          ln -sf "$(command -v sha256sum)" "${compat_bin}/sha256"
+          export PATH="${compat_bin}:${PATH}"
 
-            control_archive="$(ar t "${pkg}" | grep '^control\.tar\.' | head -n 1)"
-            if [ -z "${control_archive}" ]; then
-              echo "Missing control archive in ${pkg}"
-              exit 1
-            fi
-
-            case "${control_archive}" in
-              *.tar.gz) tar_flag="z" ;;
-              *.tar.xz) tar_flag="J" ;;
-              *.tar.zst) tar_flag="--zstd" ;;
-              *.tar.bz2) tar_flag="j" ;;
-              *.tar) tar_flag="" ;;
-              *)
-                echo "Unsupported control archive format: ${control_archive}"
-                exit 1
-                ;;
-            esac
-
-            {
-              echo "Filename: $(basename "${pkg}")"
-              echo "Size: $(stat -c '%s' "${pkg}")"
-              echo "SHA256sum: $(sha256sum "${pkg}" | awk '{print $1}')"
-
-              if [ "${tar_flag}" = "--zstd" ]; then
-                ar p "${pkg}" "${control_archive}" | tar --zstd -xOf - ./control
-              elif [ -n "${tar_flag}" ]; then
-                ar p "${pkg}" "${control_archive}" | tar -xO${tar_flag}f - ./control
-              else
-                ar p "${pkg}" "${control_archive}" | tar -xOf - ./control
-              fi
-
-              echo
-            } >> "${feed_dir}/Packages"
-          done
+          (
+            cd "${feed_dir}"
+            "${imagebuilder_dir}/scripts/ipkg-make-index.sh" . > Packages
+          )
 
           gzip -9nc "${feed_dir}/Packages" > "${feed_dir}/Packages.gz"
 
