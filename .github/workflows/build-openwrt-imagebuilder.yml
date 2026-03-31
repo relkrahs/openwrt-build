@@ -1,0 +1,166 @@
+name: Build OpenWrt Images
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Device to build
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - xiaomi-redmi-router-ax6s
+          - xiaomi-mi-router-cr6608
+      openwrt_release:
+        description: OpenWrt release version
+        required: false
+        default: 25.12.2
+      openclash_release:
+        description: OpenClash release tag or latest
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  DEFAULT_OPENWRT_RELEASE: 25.12.2
+  DEFAULT_OPENCLASH_RELEASE: latest
+  OPENCLASH_FEED_NAME: openclash_custom
+  PACKAGES_COMMON: >-
+    luci luci-compat
+    bash dnsmasq-full ca-bundle curl ip-full ruby ruby-yaml unzip
+    kmod-tun kmod-inet-diag kmod-nft-tproxy
+    -dnsmasq
+    luci-app-openclash
+
+jobs:
+  build:
+    name: ${{ matrix.device.name }} image
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        github.event_name != 'workflow_dispatch' ||
+        github.event.inputs.device == 'all' ||
+        github.event.inputs.device == matrix.device.name
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device:
+          - name: xiaomi-redmi-router-ax6s
+            target: mediatek
+            subtarget: mt7622
+            profile: xiaomi_redmi-router-ax6s
+            package_arch: aarch64_cortex-a53
+          - name: xiaomi-mi-router-cr6608
+            target: ramips
+            subtarget: mt7621
+            profile: xiaomi_mi-router-cr6608
+            package_arch: mipsel_24kc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd libgmp3-dev
+
+      - name: Resolve build variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          openwrt_release="${{ github.event.inputs.openwrt_release || '' }}"
+          openclash_release="${{ github.event.inputs.openclash_release || '' }}"
+
+          if [ -z "${openwrt_release}" ]; then
+            openwrt_release="${DEFAULT_OPENWRT_RELEASE}"
+          fi
+
+          if [ -z "${openclash_release}" ]; then
+            openclash_release="${DEFAULT_OPENCLASH_RELEASE}"
+          fi
+
+          imagebuilder_name="openwrt-imagebuilder-${openwrt_release}-${{ matrix.device.target }}-${{ matrix.device.subtarget }}.Linux-x86_64"
+          imagebuilder_archive="${imagebuilder_name}.tar.zst"
+          download_url="https://downloads.openwrt.org/releases/${openwrt_release}/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/${imagebuilder_archive}"
+
+          echo "openwrt_release=${openwrt_release}" >> "${GITHUB_OUTPUT}"
+          echo "openclash_release=${openclash_release}" >> "${GITHUB_OUTPUT}"
+          echo "imagebuilder_name=${imagebuilder_name}" >> "${GITHUB_OUTPUT}"
+          echo "imagebuilder_archive=${imagebuilder_archive}" >> "${GITHUB_OUTPUT}"
+          echo "download_url=${download_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download ImageBuilder
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-delay 5 \
+            "${{ steps.vars.outputs.download_url }}" \
+            -o "${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_archive }}"
+          tar --zstd -xf "${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_archive }}" -C "${{ runner.temp }}"
+
+      - name: Prepare local OpenClash feed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          feed_dir="${{ runner.temp }}/openclash-feed"
+          mkdir -p "${feed_dir}"
+
+          api_url="https://api.github.com/repos/vernesong/OpenClash/releases/latest"
+          if [ "${{ steps.vars.outputs.openclash_release }}" != "latest" ]; then
+            api_url="https://api.github.com/repos/vernesong/OpenClash/releases/tags/${{ steps.vars.outputs.openclash_release }}"
+          fi
+
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${api_url}" \
+            -o "${feed_dir}/release.json"
+
+          asset_url="$(jq -r '.assets[] | select(.name | endswith(".ipk")) | .browser_download_url' "${feed_dir}/release.json" | head -n 1)"
+          if [ -z "${asset_url}" ] || [ "${asset_url}" = "null" ]; then
+            echo "No .ipk asset found in OpenClash release metadata"
+            exit 1
+          fi
+
+          asset_name="$(basename "${asset_url}")"
+          curl -fL --retry 5 --retry-delay 5 "${asset_url}" -o "${feed_dir}/${asset_name}"
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          imagebuilder_dir="${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}"
+          feed_dir="${{ runner.temp }}/openclash-feed"
+
+          "${imagebuilder_dir}/scripts/ipkg-make-index.sh" "${feed_dir}" > "${feed_dir}/Packages"
+          gzip -9nc "${feed_dir}/Packages" > "${feed_dir}/Packages.gz"
+
+          printf '\nsrc/gz %s file://%s\n' "${OPENCLASH_FEED_NAME}" "${feed_dir}" >> "${imagebuilder_dir}/repositories.conf"
+
+          make -C "${imagebuilder_dir}" image \
+            PROFILE="${{ matrix.device.profile }}" \
+            PACKAGES="${PACKAGES_COMMON}" \
+            FILES="${GITHUB_WORKSPACE}/files"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ steps.vars.outputs.openwrt_release }}-${{ matrix.device.name }}-${{ matrix.device.package_arch }}
+          path: |
+            ${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_name }}/bin/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/*
+          if-no-files-found: error
+          retention-days: 7

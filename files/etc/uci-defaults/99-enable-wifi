@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+if [ ! -f /etc/config/wireless ]; then
+  wifi config
+fi
+
+changed=0
+
+for section in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device$/\1/p"); do
+  uci -q set "wireless.${section}.disabled=0"
+  changed=1
+done
+
+for section in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface$/\1/p"); do
+  uci -q set "wireless.${section}.disabled=0"
+  changed=1
+done
+
+if [ "${changed}" -eq 1 ]; then
+  uci commit wireless
+fi
+
+exit 0
