@@ -42,12 +42,6 @@ jobs:
   build:
     name: ${{ matrix.device.name }} image
     runs-on: ubuntu-24.04
-    if: >-
-      ${{
-        github.event_name != 'workflow_dispatch' ||
-        github.event.inputs.device == 'all' ||
-        github.event.inputs.device == matrix.device.name
-      }}
     strategy:
       fail-fast: false
       matrix:
@@ -64,15 +58,35 @@ jobs:
             package_arch: mipsel_24kc
 
     steps:
+      - name: Decide whether to build this device
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          selected_device="${{ github.event.inputs.device || 'all' }}"
+          should_build=false
+
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] || \
+             [ "${selected_device}" = "all" ] || \
+             [ "${selected_device}" = "${{ matrix.device.name }}" ]; then
+            should_build=true
+          fi
+
+          echo "should_build=${should_build}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout
+        if: steps.filter.outputs.should_build == 'true'
         uses: actions/checkout@v4
 
       - name: Install build dependencies
+        if: steps.filter.outputs.should_build == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y zstd libgmp3-dev
 
       - name: Resolve build variables
+        if: steps.filter.outputs.should_build == 'true'
         id: vars
         shell: bash
         run: |
@@ -100,6 +114,7 @@ jobs:
           echo "download_url=${download_url}" >> "${GITHUB_OUTPUT}"
 
       - name: Download ImageBuilder
+        if: steps.filter.outputs.should_build == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +124,7 @@ jobs:
           tar --zstd -xf "${{ runner.temp }}/${{ steps.vars.outputs.imagebuilder_archive }}" -C "${{ runner.temp }}"
 
       - name: Prepare local OpenClash feed
+        if: steps.filter.outputs.should_build == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -139,6 +155,7 @@ jobs:
           curl -fL --retry 5 --retry-delay 5 "${asset_url}" -o "${feed_dir}/${asset_name}"
 
       - name: Build image
+        if: steps.filter.outputs.should_build == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -157,6 +174,7 @@ jobs:
             FILES="${GITHUB_WORKSPACE}/files"
 
       - name: Upload firmware
+        if: steps.filter.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-${{ steps.vars.outputs.openwrt_release }}-${{ matrix.device.name }}-${{ matrix.device.package_arch }}
