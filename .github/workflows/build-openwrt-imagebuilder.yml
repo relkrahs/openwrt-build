@@ -156,6 +156,17 @@ jobs:
             -o "${feed_dir}/${asset_name}"
 
           file "${feed_dir}/${asset_name}"
+          if ! ar t "${feed_dir}/${asset_name}" >/dev/null 2>&1; then
+            if gzip -t "${feed_dir}/${asset_name}" >/dev/null 2>&1; then
+              mv "${feed_dir}/${asset_name}" "${feed_dir}/${asset_name}.gz"
+              gunzip "${feed_dir}/${asset_name}.gz"
+            else
+              echo "Downloaded asset is not a valid .ipk archive"
+              exit 1
+            fi
+          fi
+
+          file "${feed_dir}/${asset_name}"
           ar t "${feed_dir}/${asset_name}" >/dev/null
 
       - name: Build image
