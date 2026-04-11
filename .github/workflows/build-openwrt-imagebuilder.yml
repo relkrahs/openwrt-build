@@ -11,7 +11,7 @@ on:
         options:
           - all
           - xiaomi-redmi-router-ax6s
-          - xiaomi-mi-router-cr6608
+          - xiaomi-mi-router-cr6609
       openwrt_ref:
         description: OpenWrt git branch or tag
         required: false
@@ -36,12 +36,10 @@ jobs:
             target: mediatek
             subtarget: mt7622
             config_device: CONFIG_TARGET_mediatek_mt7622_DEVICE_xiaomi_redmi-router-ax6s
-            package_arch: aarch64_cortex-a53
-          - name: xiaomi-mi-router-cr6608
+          - name: xiaomi-mi-router-cr6609
             target: ramips
             subtarget: mt7621
-            config_device: CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608
-            package_arch: mipsel_24kc
+            config_device: CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6609
 
     steps:
       - name: Decide whether to build this device
@@ -184,11 +182,40 @@ jobs:
           cd openwrt
           make -j"$(nproc)" || make -j1 V=s
 
+      - name: Resolve artifact name
+        if: steps.filter.outputs.should_build == 'true'
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_dir="openwrt/bin/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}"
+
+          artifact_file="$(find "${target_dir}" -maxdepth 1 -type f -name 'openwrt-*-initramfs-kernel.*' | sort | head -n 1)"
+
+          if [ -z "${artifact_file}" ]; then
+            artifact_file="$(find "${target_dir}" -maxdepth 1 -type f -name 'openwrt-*-sysupgrade.*' | sort | head -n 1)"
+          fi
+
+          if [ -z "${artifact_file}" ]; then
+            artifact_file="$(find "${target_dir}" -maxdepth 1 -type f -name 'openwrt-*' | sort | head -n 1)"
+          fi
+
+          if [ -z "${artifact_file}" ]; then
+            echo "No OpenWrt artifact found in ${target_dir}" >&2
+            exit 1
+          fi
+
+          artifact_name="$(basename "${artifact_file}")"
+          artifact_name="${artifact_name%.*}"
+
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
       - name: Upload firmware
         if: steps.filter.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ steps.vars.outputs.openwrt_ref }}-${{ matrix.device.name }}-${{ matrix.device.package_arch }}
+          name: ${{ steps.artifact.outputs.artifact_name }}
           path: |
             openwrt/bin/targets/${{ matrix.device.target }}/${{ matrix.device.subtarget }}/*
           if-no-files-found: error
